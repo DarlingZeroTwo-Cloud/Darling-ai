@@ -12,6 +12,7 @@ import 'pages/models_page.dart';
 import 'pages/plugins_page.dart';
 import 'pages/settings_page.dart';
 import 'pages/local_models_page.dart';
+import 'pages/browser_page.dart';
 
 const Color kPrimaryLight = Color(0xFF0F766E);
 const Color kPrimaryDark = Color(0xFF2BBBAD);
@@ -270,6 +271,14 @@ class _HomeShellState extends State<HomeShell> {
                       ]),
                     ),
                     PopupMenuItem(
+                      value: 5,
+                      child: Row(children: [
+                        Icon(Icons.public_outlined, size: 18, color: _nav == 5 ? cs.primary : cs.onSurfaceVariant),
+                        const SizedBox(width: 10),
+                        Text('浏览器', style: TextStyle(fontWeight: _nav == 5 ? FontWeight.w600 : FontWeight.w400)),
+                      ]),
+                    ),
+                    PopupMenuItem(
                       value: 4,
                       child: Row(children: [
                         Icon(Icons.smart_toy_outlined, size: 18, color: _nav == 4 ? cs.primary : cs.onSurfaceVariant),
@@ -345,9 +354,11 @@ class _HomeShellState extends State<HomeShell> {
                     ? ModelsPage(state: widget.state)
                     : _nav == 2
                         ? PluginsPage(state: widget.state)
-                        : _nav == 4
-                            ? LocalModelsPage(state: widget.state)
-                            : SettingsPage(state: widget.state),
+                        : _nav == 5
+                            ? BrowserPage(state: widget.state)
+                            : _nav == 4
+                                ? LocalModelsPage(state: widget.state)
+                                : SettingsPage(state: widget.state),
           ),
         ],
           ),

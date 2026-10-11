@@ -163,13 +163,15 @@ DEFAULT_PROVIDERS = [
 ]
 
 DEFAULT_SYSTEM_PROMPT = (
-    "你是运行在用户电脑上的命令行 AI 助手，通过终端与用户交流。\n"
+    "你是运行在用户电脑上的 AI 助手 darling-ai，通过 GUI 与用户交流。\n"
     "你拥有在用户指定的\"工作区\"目录里执行命令的能力。当你需要查看文件、"
     "运行程序、处理数据等实际操作时，请输出如下格式的命令块：\n"
     "[[CMD]]在这里写要执行的命令[[/CMD]]\n"
     "命令会在用户电脑上真实执行，请务必小心谨慎，不要执行任何可能造成破坏"
-    "或危险的命令。执行结果会自动返回给你，你可以根据结果继续工作。"
-    "如果不需要执行命令，直接正常回答用户即可。"
+    "或危险的命令。执行结果会自动返回给你，你可以根据结果继续工作。\n"
+    "如果不需要执行命令，直接正常回答用户即可。\n"
+    "【工作区工具】你还可以使用文件读写、目录浏览、git 操作与网页浏览工具"
+    "（见下方可用工具标记），优先用工具而非命令来完成文件类操作。"
 )
 
 DEFAULT_SETTINGS = {
@@ -180,9 +182,22 @@ DEFAULT_SETTINGS = {
     "top_p": 1.0,
     "connect_timeout": 15,       # 连接超时（秒）
     "api_retries": 1,            # API 请求失败后的额外重试次数
+    "read_timeout": 300,         # 读取超时（秒），防长时间无响应
+    "auto_reconnect": True,      # 流式中断自动重连
     "use_proxy": False,          # 是否使用系统代理（默认关，避免代理残留导致卡死）
     "system_prompt": DEFAULT_SYSTEM_PROMPT,
     "workspace": None,           # 首次运行时自动设为程序所在目录
+    # ---- 3.0 新增 ----
+    "context_auto_compress": True,   # 上下文超限自动压缩（滑动窗口）
+    "context_max_tokens": 24000,     # 压缩阈值（估算 token 数）
+    "memory_enabled": True,          # 跨会话长期记忆
+    "task_mode": False,              # 任务模式：AI 先规划多步再逐步执行
+    "browser_enabled": True,         # 内置浏览器工具（读网页）
+    "workspace_tools": True,         # 工作区工具（文件读写/git）
+    "container_mode": "off",         # off=直接操作本机 / container=在容器里工作
+    "container_target": "",          # 容器目标：WSL 发行版名 或 docker 镜像名
+    "container_image": "ubuntu:latest",
+    "mcp_servers": {},               # MCP server 配置: {名称: {command,args,env,enabled}}
 }
 
 
@@ -300,6 +315,14 @@ PLUGIN_FORMAT_DOC = """插件 JSON 格式（每个插件是一个 .json 文件�
 - web_search_deep：深度联网搜索，内容=搜索关键词。搜索后自动打开前几条结果网页抓正文，返回带正文的详细结果，自动存数据库。适合需要深入阅读资料时。
 - fetch_page：抓取指定网页正文，内容=完整 URL（必须以 http:// 或 https:// 开头）。返回该网页正文文本，自动存数据库。
 - make_plugin：插件工坊，内容=完整插件 JSON（本格式），程序会校验并自动安装。
+- file_read：读取工作区内文件，内容=文件路径（相对工作区，禁止越界）。返回文件文本。
+- file_write：写入工作区内文件，内容格式=第一行文件路径，换行后是文件内容。
+- dir_list：列出目录内容，内容=目录路径（默认当前工作区）。
+- git_status：查看 git 工作区状态，内容可留空。
+- git_diff：查看 git 改动，内容=可选文件路径。
+- git_commit：提交 git 改动，内容=提交信息。
+- browser_open：内置浏览器打开网页，内容=URL。返回网页正文。
+- container_exec：在容器（Windows 用 WSL / Linux 用 Docker）中执行命令，内容=要在容器里执行的命令。
 
 注意：pattern 和 close 必须是成对的标记，不能与已有插件的标记冲突（比如已经有 [[SEARCH]]，新插件就别再用）。
 插件 id 不能和已存在插件 id 重复（重复会覆盖）。"""
@@ -983,6 +1006,46 @@ PLUGIN_HANDLERS["web_search_deep"] = handler_web_search_deep
 PLUGIN_HANDLERS["fetch_page"] = handler_fetch_page
 PLUGIN_HANDLERS["make_plugin"] = handler_make_plugin
 
+# ---- 3.0 内置工作区/浏览器/容器工具 ----
+try:
+    from workspace_tools import (
+        handler_file_read, handler_file_write, handler_dir_list,
+        handler_git_status, handler_git_diff, handler_git_commit,
+        handler_browser_open, handler_browser_read,
+    )
+    PLUGIN_HANDLERS["file_read"] = handler_file_read
+    PLUGIN_HANDLERS["file_write"] = handler_file_write
+    PLUGIN_HANDLERS["dir_list"] = handler_dir_list
+    PLUGIN_HANDLERS["git_status"] = handler_git_status
+    PLUGIN_HANDLERS["git_diff"] = handler_git_diff
+    PLUGIN_HANDLERS["git_commit"] = handler_git_commit
+    PLUGIN_HANDLERS["browser_open"] = handler_browser_open
+    PLUGIN_HANDLERS["browser_read"] = handler_browser_read
+except Exception as _e:
+    print(col(f"[警告] 工作区工具加载失败: {_e}", C.YELLOW))
+
+try:
+    import container as _container_mod
+
+    def handler_container_exec(content, workspace=None):
+        """在容器里执行命令（Windows=WSL 发行版，Linux=Docker 镜像）。"""
+        cfg = Config()
+        settings = cfg.data["settings"]
+        mode = settings.get("container_mode", "off")
+        if mode != "container":
+            return False, "容器模式未开启，请先在设置里选择容器模式并配置目标。"
+        if _container_mod.is_windows():
+            target = settings.get("container_target") or ""
+            if not target:
+                return False, "未选择 WSL 发行版，请在设置里选择。"
+            return _container_mod.wsl_exec(target, content, workspace=workspace)
+        image = settings.get("container_target") or settings.get("container_image") or "ubuntu:latest"
+        return _container_mod.docker_exec(image, content, workspace=workspace)
+
+    PLUGIN_HANDLERS["container_exec"] = handler_container_exec
+except Exception as _e:
+    print(col(f"[警告] 容器工具加载失败: {_e}", C.YELLOW))
+
 
 def ask(prompt):
     """读取用户输入：去空白、去 BOM（兼容重定向自带 BOM 的输入文件）。"""
@@ -1046,25 +1109,140 @@ def choose_workspace(current):
 
 
 # ==================== 对话 ====================
+BUILTIN_TOOLS = [
+    ("file_read", "读取工作区内文件，内容=文件路径。", "[[FILEREAD]]", "[[/FILEREAD]]"),
+    ("file_write", "写入工作区内文件，内容=第一行文件路径，换行后是文件内容。", "[[FILEWRITE]]", "[[/FILEWRITE]]"),
+    ("dir_list", "列出目录内容，内容=目录路径（默认当前工作区）。", "[[DIRLIST]]", "[[/DIRLIST]]"),
+    ("git_status", "查看 git 工作区状态，内容可留空。", "[[GITSTATUS]]", "[[/GITSTATUS]]"),
+    ("git_diff", "查看 git 改动，内容=可选文件路径。", "[[GITDIFF]]", "[[/GITDIFF]]"),
+    ("git_commit", "提交 git 改动，内容=提交信息。", "[[GITCOMMIT]]", "[[/GITCOMMIT]]"),
+    ("browser_open", "内置浏览器打开网页并返回正文，内容=URL。", "[[BROWSE]]", "[[/BROWSE]]"),
+    ("container_exec", "在容器里执行命令（Windows=WSL / Linux=Docker），内容=命令。", "[[CTREXEC]]", "[[/CTREXEC]]"),
+]
+
+_mcp_markers_cache = {"ts": 0.0, "val": []}
+
+
+def builtin_tool_markers(settings):
+    """按设置返回启用的内置工具标记列表。"""
+    markers = []
+    if settings.get("workspace_tools", True):
+        for tname, desc, opn, clo in BUILTIN_TOOLS[:6]:
+            markers.append(("内置工具", tname, opn, clo, desc))
+    if settings.get("browser_enabled", True):
+        markers.append(("内置工具", "browser_open", "[[BROWSE]]", "[[/BROWSE]]",
+                        "内置浏览器打开网页并返回正文，内容=URL。"))
+    if settings.get("container_mode") == "container":
+        markers.append(("内置工具", "container_exec", "[[CTREXEC]]", "[[/CTREXEC]]",
+                        "在容器里执行命令（Windows=WSL / Linux=Docker），内容=命令。"))
+    # MCP 工具
+    try:
+        import mcp_client
+        servers = settings.get("mcp_servers") or {}
+        if servers:
+            now = time.time()
+            if now - _mcp_markers_cache["ts"] > 30:
+                _mcp_markers_cache["val"] = mcp_client.all_markers(settings)
+                _mcp_markers_cache["ts"] = now
+            markers += _mcp_markers_cache["val"]
+    except Exception:
+        pass
+    return markers
+
+
+def _estimate_tokens(messages):
+    """粗略估算 token 数（中文约 1 字≈1.5 token，按字符数/1.8 估算）。"""
+    total = 0
+    for m in messages:
+        c = m.get("content")
+        if isinstance(c, str):
+            total += max(1, int(len(c) / 1.8))
+    return total
+
+
+def _compress_history(history, max_tokens):
+    """上下文超限时压缩：保留首条（含开场信息）+ 最近的若干条。"""
+    if not history:
+        return history, False
+    kept = [history[0]]
+    rest = history[1:]
+    # 从后往前收集，直到逼近预算（留 30% 给新消息和 system）
+    budget = int(max_tokens * 0.7)
+    tail = []
+    used = _estimate_tokens(kept)
+    for m in reversed(rest):
+        cost = _estimate_tokens([m])
+        if used + cost > budget and tail:
+            break
+        tail.insert(0, m)
+        used += cost
+    compressed = kept + tail
+    return compressed, len(compressed) < len(history)
+
+
 def build_messages(cfg, model_id):
-    """构造消息列表：系统提示词 + 插件工具说明 + 历史。"""
-    system = cfg.data["settings"]["system_prompt"]
+    """构造消息列表：系统提示词 + 插件/内置工具说明 + 记忆 + 历史(自动压缩)。"""
+    settings = cfg.data["settings"]
+    system = settings["system_prompt"]
+
+    lines = [system]
+    tool_lines = []
+
     markers = enabled_plugin_markers()
     if markers:
-        lines = [system, "", "## 可用工具（由已安装插件提供）", "需要真实信息或执行插件功能时，在回复中输出对应的开标记+内容+闭标记，程序会执行并把结果回传给你。"]
+        tool_lines.append("## 可用工具（由已安装插件提供）")
+        tool_lines.append("需要真实信息或执行插件功能时，在回复中输出对应的开标记+内容+闭标记，程序会执行并把结果回传给你。")
         for pname, tname, opn, clo, desc in markers:
-            lines.append(f"- [{tname}] {desc}  (标记: {opn}内容{clo})")
+            tool_lines.append(f"- [{tname}] {desc}  (标记: {opn}内容{clo})")
+
+    bmarkers = builtin_tool_markers(settings)
+    if bmarkers:
+        tool_lines.append("## 内置工具（工作区/浏览器/容器/MCP）")
+        tool_lines.append("这些工具同样通过标记调用，程序执行后会把结果回传。")
+        for pname, tname, opn, clo, desc in bmarkers:
+            tool_lines.append(f"- [{tname}] {desc}  (标记: {opn}内容{clo})")
+
+    if tool_lines:
+        lines.append("")
+        lines.extend(tool_lines)
         lines.append("")
         lines.append(PLUGIN_FORMAT_DOC)
-        system = "\n".join(lines)
-    messages = [{"role": "system", "content": system}]
-    messages += cfg.history(model_id)[-HISTORY_LIMIT:]
+
+    # 跨会话记忆注入
+    if settings.get("memory_enabled", True):
+        try:
+            import memory as _memory
+            mems = _memory.load_memories()
+            if mems:
+                mem_lines = ["## 关于用户的长期记忆（上次会话沉淀，供参考）"]
+                for mm in mems[:10]:
+                    mem_lines.append(f"- [{mm['tag']}] {mm['content'][:300]}")
+                lines.append("")
+                lines.append("\n".join(mem_lines))
+        except Exception:
+            pass
+
+    messages = [{"role": "system", "content": "\n".join(lines)}]
+
+    history = cfg.history(model_id)[-HISTORY_LIMIT:]
+    if settings.get("context_auto_compress", True):
+        max_tok = int(settings.get("context_max_tokens", 24000) or 24000)
+        history, compressed = _compress_history(history, max_tok)
+        if compressed:
+            messages.append({"role": "system",
+                             "content": "（较早的对话因上下文限制已自动精简，仅保留近期内容；如需要更早信息请直接询问用户。）"})
+    messages += history
     return messages
 
 
 def plugin_markers_for_request():
-    """供 stream_reply 使用的插件标记列表: [(插件名, 工具名, 开, 闭, 说明)]"""
-    return enabled_plugin_markers()
+    """供 stream_reply 使用的插件标记列表: [(插件名, 工具名, 开, 闭, 说明)]
+    含插件 + 内置工具（工作区/浏览器/容器）+ MCP 工具。"""
+    try:
+        settings = Config().data["settings"]
+    except Exception:
+        settings = dict(DEFAULT_SETTINGS)
+    return enabled_plugin_markers() + builtin_tool_markers(settings)
 
 
 class _Spinner:

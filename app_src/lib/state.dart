@@ -201,7 +201,8 @@ class AppState extends ChangeNotifier {
   }
 
   // ---------------- 对话 ----------------
-  Future<void> send(String text) async {
+  /// 发送消息，可带多模态图片（data_url 列表）
+  Future<void> send(String text, {List<Map<String, dynamic>> images = const []}) async {
     final m = model(currentModelId);
     if (m == null || busy || text.trim().isEmpty) return;
     busy = true;
@@ -213,39 +214,48 @@ class AppState extends ChangeNotifier {
     notifyListeners();
 
     try {
-      await api.chat(m['id'] as String, text, (ev) {
-        switch (ev['type']) {
-          case 'state':
-            thinkingText = (ev['text'] ?? '').toString();
-            break;
-          case 'token':
-            if (messages.isEmpty || messages.last.kind != MsgKind.ai) {
-              messages.add(ChatMsg(MsgKind.ai, ''));
-            }
-            messages.last.text += (ev['text'] ?? '').toString();
-            break;
-          case 'tool':
-            final t = (ev['title'] ?? '').toString();
-            final c = (ev['content'] ?? '').toString();
-            final ok = ev['ok'] == true;
-            if (c.isNotEmpty) {
-              messages.add(ChatMsg(MsgKind.tool, c, title: t, ok: ok));
-            }
-            break;
-          case 'ask':
-            askPending = true;
-            askCmd = (ev['cmd'] ?? '').toString();
-            break;
-          case 'error':
-            final e = (ev['text'] ?? '').toString();
-            messages.add(ChatMsg(MsgKind.error, e));
-            break;
-        }
-        notifyListeners();
-      }, onJob: (id) {
-        jobId = id;
-        _jobId = id;
-      });
+      await api.chat(
+        m['id'] as String,
+        text,
+        images: images,
+        onEvent: (ev) {
+          switch (ev['type']) {
+            case 'state':
+              thinkingText = (ev['text'] ?? '').toString();
+              break;
+            case 'step':
+              thinkingText = (ev['text'] ?? '任务执行中…').toString();
+              break;
+            case 'token':
+              if (messages.isEmpty || messages.last.kind != MsgKind.ai) {
+                messages.add(ChatMsg(MsgKind.ai, ''));
+              }
+              messages.last.text += (ev['text'] ?? '').toString();
+              break;
+            case 'tool':
+              final t = (ev['title'] ?? '').toString();
+              final c = (ev['content'] ?? '').toString();
+              final ok = ev['ok'] == true;
+              if (c.isNotEmpty) {
+                messages.add(ChatMsg(MsgKind.tool, c, title: t, ok: ok));
+              }
+              break;
+            case 'ask':
+              askPending = true;
+              askCmd = (ev['cmd'] ?? '').toString();
+              break;
+            case 'error':
+              final e = (ev['text'] ?? '').toString();
+              messages.add(ChatMsg(MsgKind.error, e));
+              break;
+          }
+          notifyListeners();
+        },
+        onJob: (id) {
+          jobId = id;
+          _jobId = id;
+        },
+      );
       // 完成：恢复默认 thinking（无流时占位）
       if (messages.isEmpty || messages.last.kind != MsgKind.ai) {
         messages.add(ChatMsg(MsgKind.think, ''));
@@ -262,6 +272,17 @@ class AppState extends ChangeNotifier {
       thinkingText = '';
       notifyListeners();
     }
+  }
+
+  /// 导出当前会话（Markdown）
+  Future<String?> exportConversation() async {
+    final convId = activeConvId;
+    if (convId == null) return null;
+    try {
+      final r = await api.convoExport(convId);
+      if (r['ok'] == true) return r['markdown'] as String?;
+    } catch (_) {}
+    return null;
   }
 
   Future<void> answerAsk(bool allow) async {

@@ -172,6 +172,149 @@ class SettingsPage extends StatelessWidget {
                   ),
                   const SizedBox(height: 14),
                   _Card(
+                    title: '对话稳定性',
+                    children: [
+                      _Row(
+                        label: '上下文自动压缩',
+                        desc: '历史过长时自动截断并保留要点，防止对话中断 / 超长报错。',
+                        trailing: Switch(
+                          value: s['context_auto_compress'] != false,
+                          onChanged: (v) {
+                            state.settings['context_auto_compress'] = v;
+                            state.saveSettings();
+                          },
+                        ),
+                      ),
+                      _Row(
+                        label: '压缩阈值 tokens',
+                        desc: '超过该长度时触发压缩（保留首条系统指令 + 尾部最近内容）。',
+                        trailing: SpinField(
+                          min: 2048,
+                          max: 262144,
+                          value:
+                              (s['context_max_tokens'] as num? ?? 24000).toDouble(),
+                          step: 1024,
+                          onChanged: (v) {
+                            state.settings['context_max_tokens'] = v.toInt();
+                            state.saveSettings();
+                          },
+                        ),
+                      ),
+                      _Row(
+                        label: '流式自动重连',
+                        desc: '网络波动导致流中断时自动重连，减少“对话中断”。',
+                        trailing: Switch(
+                          value: s['auto_reconnect'] != false,
+                          onChanged: (v) {
+                            state.settings['auto_reconnect'] = v;
+                            state.saveSettings();
+                          },
+                        ),
+                      ),
+                      _Row(
+                        label: '读取超时（秒）',
+                        desc: '单次流式读取的最大等待时间，防止长时间无响应。',
+                        trailing: SpinField(
+                          min: 10,
+                          max: 600,
+                          value: (s['read_timeout'] as num? ?? 120).toDouble(),
+                          step: 10,
+                          onChanged: (v) {
+                            state.settings['read_timeout'] = v.toInt();
+                            state.saveSettings();
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  _Card(
+                    title: '智能与记忆',
+                    children: [
+                      _Row(
+                        label: '跨会话长期记忆',
+                        desc: '对话结束后自动沉淀要点，下次对话自动带入，让 AI“记得你”。',
+                        trailing: Switch(
+                          value: s['memory_enabled'] == true,
+                          onChanged: (v) {
+                            state.settings['memory_enabled'] = v;
+                            state.saveSettings();
+                          },
+                        ),
+                      ),
+                      _Row(
+                        label: '任务模式',
+                        desc: '开启后 AI 会规划多步任务并逐步执行（配合文件 / git / 容器工具）。',
+                        trailing: Switch(
+                          value: s['task_mode'] == true,
+                          onChanged: (v) {
+                            state.settings['task_mode'] = v;
+                            state.saveSettings();
+                          },
+                        ),
+                      ),
+                      _Row(
+                        label: '长期记忆库',
+                        desc: '查看 / 清空已沉淀的跨会话记忆。',
+                        trailing: OutlinedButton(
+                          onPressed: () async {
+                            try {
+                              final r = await state.api.memoryList();
+                              final items = (r['items'] ?? []) as List;
+                              await showDialog(
+                                context: context,
+                                builder: (ctx) => AlertDialog(
+                                  title: const Text('长期记忆'),
+                                  content: SizedBox(
+                                    width: 420,
+                                    child: items.isEmpty
+                                        ? const Text('暂无记忆')
+                                        : Column(
+                                            mainAxisSize: MainAxisSize.min,
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              for (final it in items
+                                                      .take(20)
+                                                      .toList())
+                                                Padding(
+                                                  padding: const EdgeInsets
+                                                      .symmetric(vertical: 4),
+                                                  child: Text(
+                                                    '• ${it['tag']}：${it['summary']}',
+                                                    style: const TextStyle(
+                                                        fontSize: 13),
+                                                  ),
+                                                ),
+                                            ],
+                                          ),
+                                  ),
+                                  actions: [
+                                    TextButton(
+                                        onPressed: () =>
+                                            Navigator.pop(ctx),
+                                        child: const Text('关闭')),
+                                    TextButton(
+                                      onPressed: () async {
+                                        await state.api.memoryClear();
+                                        Navigator.pop(ctx);
+                                      },
+                                      child: const Text('清空',
+                                          style: TextStyle(
+                                              color: Colors.redAccent)),
+                                    ),
+                                  ],
+                                ),
+                              );
+                            } catch (_) {}
+                          },
+                          child: const Text('查看 / 清空'),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  _Card(
                     title: '本地推理',
                     children: [
                       _Row(
@@ -402,6 +545,228 @@ class SettingsPage extends StatelessWidget {
                   ),
                   const SizedBox(height: 14),
                   _Card(
+                    title: 'MCP 服务',
+                    children: [
+                      _Row(
+                        label: 'MCP 工具调用',
+                        desc: '连接外部 MCP 服务器（如文件系统、数据库、浏览器工具），AI 可直接调用。',
+                        trailing: Switch(
+                          value: s['mcp_enabled'] != false,
+                          onChanged: (v) {
+                            state.settings['mcp_enabled'] = v;
+                            state.saveSettings();
+                          },
+                        ),
+                      ),
+                      _Row(
+                        label: 'MCP 服务器',
+                        desc: '管理已配置的 MCP server（stdio 方式）。',
+                        trailing: OutlinedButton(
+                          onPressed: () async {
+                            try {
+                              final r = await state.api.mcpList();
+                              final servers = (r['servers'] ?? []) as List;
+                              await showDialog(
+                                context: context,
+                                builder: (ctx) => AlertDialog(
+                                  title: const Text('MCP 服务器'),
+                                  content: SizedBox(
+                                    width: 460,
+                                    child: Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        if (servers.isEmpty)
+                                          const Padding(
+                                            padding: EdgeInsets.all(16),
+                                            child: Text('暂无 MCP 服务器'),
+                                          )
+                                        else
+                                          for (final sv in servers)
+                                            ListTile(
+                                              dense: true,
+                                              title: Text(
+                                                  '${sv['name']}',
+                                                  style: const TextStyle(
+                                                      fontSize: 13)),
+                                              subtitle: Text(
+                                                  '命令: ${sv['command']}',
+                                                  style: const TextStyle(
+                                                      fontSize: 12)),
+                                              trailing: IconButton(
+                                                icon: const Icon(
+                                                    Icons.delete_outline,
+                                                    size: 18),
+                                                onPressed: () async {
+                                                  await state.api
+                                                      .mcpDelete(
+                                                          sv['name']);
+                                                  if (ctx.mounted) {
+                                                    Navigator.pop(ctx);
+                                                  }
+                                                },
+                                              ),
+                                            ),
+                                        const SizedBox(height: 8),
+                                        const Divider(height: 1),
+                                        const SizedBox(height: 8),
+                                        Row(
+                                          children: [
+                                            Expanded(
+                                              child: TextButton(
+                                                onPressed: () async {
+                                                  final ctl =
+                                                      TextEditingController();
+                                                  final cmdCtl =
+                                                      TextEditingController();
+                                                  final res =
+                                                      await showDialog<String?>(
+                                                    context: ctx,
+                                                    builder: (dctx) =>
+                                                        AlertDialog(
+                                                      title: const Text(
+                                                          '添加 MCP 服务器'),
+                                                      content: Column(
+                                                        mainAxisSize:
+                                                            MainAxisSize.min,
+                                                        children: [
+                                                          TextField(
+                                                            controller: ctl,
+                                                            decoration:
+                                                                const InputDecoration(
+                                                              labelText:
+                                                                  '名称',
+                                                              hintText:
+                                                                  '例如 filesystem',
+                                                            ),
+                                                          ),
+                                                          const SizedBox(
+                                                              height: 10),
+                                                          TextField(
+                                                            controller:
+                                                                cmdCtl,
+                                                            decoration:
+                                                                const InputDecoration(
+                                                              labelText:
+                                                                  '启动命令',
+                                                              hintText:
+                                                                  '例如 npx -y @modelcontextprotocol/server-filesystem D:/workspace',
+                                                            ),
+                                                          ),
+                                                        ],
+                                                      ),
+                                                      actions: [
+                                                        TextButton(
+                                                            onPressed: () =>
+                                                                Navigator.pop(
+                                                                    dctx),
+                                                            child: const Text(
+                                                                '取消')),
+                                                        FilledButton(
+                                                          onPressed: () =>
+                                                              Navigator.pop(
+                                                                  dctx,
+                                                                  '${ctl.text.trim()}\u0001${cmdCtl.text.trim()}'),
+                                                          child:
+                                                              const Text('添加'),
+                                                        ),
+                                                      ],
+                                                    ),
+                                                  );
+                                                  if (res != null &&
+                                                      res
+                                                          .split('\u0001')
+                                                          .first
+                                                          .isNotEmpty &&
+                                                      res
+                                                          .split('\u0001')
+                                                          .last
+                                                          .isNotEmpty) {
+                                                    await state.api.mcpSave({
+                                                      'name': res
+                                                          .split('\u0001')
+                                                          .first,
+                                                      'command': res
+                                                          .split('\u0001')
+                                                          .last,
+                                                    });
+                                                  }
+                                                  if (ctx.mounted) {
+                                                    Navigator.pop(ctx);
+                                                  }
+                                                },
+                                                child:
+                                                    const Text('添加服务器'),
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  actions: [
+                                    TextButton(
+                                        onPressed: () =>
+                                            Navigator.pop(ctx),
+                                        child: const Text('关闭')),
+                                  ],
+                                ),
+                              );
+                            } catch (_) {}
+                          },
+                          child: const Text('管理…'),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  _Card(
+                    title: '容器工作区',
+                    children: [
+                      _Row(
+                        label: '运行方式',
+                        desc: '本机：AI 直接在电脑上执行；容器：在 WSL / Docker 沙箱中执行。',
+                        trailing: SegmentedButton<String>(
+                          segments: const [
+                            ButtonSegment(value: 'host', label: Text('本机')),
+                            ButtonSegment(
+                                value: 'container', label: Text('容器')),
+                          ],
+                          selected: {s['container_mode'] ?? 'host'},
+                          onSelectionChanged: (sel) {
+                            state.settings['container_mode'] = sel.first;
+                            state.saveSettings();
+                          },
+                        ),
+                      ),
+                      _Row(
+                        label: '容器环境',
+                        desc: 'Windows 使用 WSL 发行版；Linux 使用 Docker 镜像。',
+                        trailing: OutlinedButton(
+                          onPressed: () => _manageContainer(context, state),
+                          child: const Text('检测 / 配置…'),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  _Card(
+                    title: '内置浏览器',
+                    children: [
+                      _Row(
+                        label: '启用联网浏览',
+                        desc: 'AI 可打开网页并抓取正文；也支持从侧边栏打开浏览器面板。',
+                        trailing: Switch(
+                          value: s['browser_enabled'] != false,
+                          onChanged: (v) {
+                            state.settings['browser_enabled'] = v;
+                            state.saveSettings();
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  _Card(
                     title: '数据',
                     children: [
                       _Row(
@@ -462,8 +827,129 @@ class SettingsPage extends StatelessWidget {
     }
   }
 
-  Future<void> _clearHistory(BuildContext context) async {
-    final ok = await showDialog<bool>(
+  Future<void> _manageContainer(BuildContext context, AppState state) async {
+    String status = '正在检测…';
+    List<Map<String, dynamic>> distros = [];
+    bool isWindows = false;
+    bool dockerOk = false;
+    try {
+      final d = await state.api.containerDetect();
+      isWindows = d['platform'] == 'Windows';
+      distros = ((d['wsl_distros'] ?? []) as List)
+          .map((e) => (e as Map).cast<String, dynamic>())
+          .toList();
+      dockerOk = d['docker'] == true;
+      if (isWindows) {
+        status = distros.isEmpty
+            ? '未检测到 WSL 发行版'
+            : '检测到 ${distros.length} 个 WSL 发行版';
+      } else {
+        status = dockerOk ? 'Docker 已安装' : '未检测到 Docker';
+      }
+    } catch (e) {
+      status = '检测失败: $e';
+    }
+
+    final isWin = isWindows;
+    await showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSt) => AlertDialog(
+          title: const Text('容器环境配置'),
+          content: SizedBox(
+            width: 440,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(status, style: const TextStyle(fontSize: 13)),
+                const SizedBox(height: 12),
+                if (isWin && distros.isNotEmpty) ...[
+                  const Text('选择 WSL 发行版：',
+                      style: TextStyle(fontSize: 13)),
+                  const SizedBox(height: 6),
+                  DropdownMenu<String>(
+                    initialSelection:
+                        (state.settings['container_target'] ?? '').toString(),
+                    dropdownMenuEntries: [
+                      for (final d in distros)
+                        DropdownMenuEntry(
+                            value: d['name'].toString(),
+                            label:
+                                '${d['name']} (${d['state']})'),
+                    ],
+                    onSelected: (v) {
+                      if (v != null) {
+                        state.settings['container_target'] = v;
+                        state.saveSettings();
+                      }
+                    },
+                  ),
+                ],
+                if (isWin && distros.isEmpty) ...[
+                  OutlinedButton(
+                    onPressed: () {
+                      Process.start(
+                          'cmd', ['/c', 'start', 'ms-windows-store://pdp/?ProductId=9N9P8S1DZ5G1']);
+                    },
+                    child: const Text('去微软商店安装 WSL'),
+                  ),
+                ],
+                if (!isWin) ...[
+                  const Text('Docker 镜像：',
+                      style: TextStyle(fontSize: 13)),
+                  const SizedBox(height: 6),
+                  TextFormField(
+                    initialValue: (state.settings['container_image']
+                            ??
+                        'ubuntu:latest')
+                        .toString(),
+                    decoration: const InputDecoration(
+                        isDense: true, hintText: 'ubuntu:latest'),
+                    onFieldSubmitted: (v) {
+                      state.settings['container_image'] = v.trim();
+                      state.saveSettings();
+                    },
+                  ),
+                  const SizedBox(height: 10),
+                  if (!dockerOk)
+                    OutlinedButton(
+                      onPressed: () async {
+                        setSt(() => status = '正在自动安装 Docker 并配置国内镜像加速…');
+                        try {
+                          final r = await state.api.containerInstallDocker();
+                          setSt(() => status =
+                              r['ok'] == true
+                                  ? '安装完成：${r['output']}'
+                                  : '安装失败：${r['output']}');
+                        } catch (e) {
+                          setSt(() => status = '安装异常: $e');
+                        }
+                      },
+                      child: const Text('自动安装 Docker + 镜像加速'),
+                    ),
+                ],
+                const SizedBox(height: 8),
+                Text(
+                  'AI 在容器模式下执行的所有命令都运行在沙箱内，无法直接修改你的系统文件。',
+                  style: TextStyle(
+                      fontSize: 12,
+                      color: Theme.of(ctx).colorScheme.onSurfaceVariant),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('关闭')),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _clearHistory(BuildContext context) async {    final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('清除对话历史'),

@@ -9,6 +9,7 @@ import 'pages/plugins_page.dart';
 import 'pages/settings_page.dart';
 import 'pages/local_models_page.dart';
 import 'pages/chat_page.dart';
+import 'pages/browser_page.dart';
 
 /// 经典模式（Zed 风格）：左侧历史对话栏 + 右侧对话区；
 /// 设置 / 模型 / 插件 / 本地 以独立窗口（全屏浮层）打开。
@@ -269,6 +270,11 @@ class _SidebarContent extends StatelessWidget {
                 icon: Icons.smart_toy_outlined,
                 label: '本地模型',
                 onTap: () => _openWindow(context, '本地模型', LocalModelsPage(state: state)),
+              ),
+              _SidebarEntry(
+                icon: Icons.public_outlined,
+                label: '浏览器',
+                onTap: () => _openWindow(context, '浏览器', BrowserPage(state: state)),
               ),
             ],
           ),

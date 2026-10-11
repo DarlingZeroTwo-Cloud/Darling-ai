@@ -1,4 +1,8 @@
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../main.dart';
 import '../state.dart';
@@ -218,18 +222,93 @@ class _Composer extends StatefulWidget {
 
 class _ComposerState extends State<_Composer> {
   final TextEditingController _ctl = TextEditingController();
+  final List<Map<String, dynamic>> _images = [];
+  final FocusNode _focus = FocusNode();
 
   @override
   void dispose() {
     _ctl.dispose();
+    _focus.dispose();
     super.dispose();
+  }
+
+  Future<void> _pasteImage() async {
+    // 桌面版剪贴板读取图片不可靠，优先走文件选择器
+    try {
+      final result = await Process.run('powershell', [
+        '-NoProfile',
+        '-Command',
+        "Add-Type -AssemblyName System.Windows.Forms; "
+            "\$d = New-Object System.Windows.Forms.OpenFileDialog; "
+            "\$d.Multiselect = \$true; "
+            "\$d.Filter = '图片|*.png;*.jpg;*.jpeg;*.gif;*.webp;*.bmp'; "
+            "if (\$d.ShowDialog() -eq 'OK') { \$d.FileNames -join '|' }"
+      ]);
+      final paths =
+          (result.stdout as String).trim().split('|').where((p) => p.isNotEmpty);
+      if (paths.isEmpty) return;
+      for (final path in paths) {
+        if (_images.length >= 4) {
+          ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('最多支持 4 张图片')));
+          break;
+        }
+        final f = File(path);
+        if (!f.existsSync()) continue;
+        final bytes = await f.readAsBytes();
+        final ext = path.toLowerCase().split('.').last;
+        final mime = ext == 'jpg' || ext == 'jpeg'
+            ? 'image/jpeg'
+            : ext == 'webp'
+                ? 'image/webp'
+                : ext == 'gif'
+                    ? 'image/gif'
+                    : 'image/png';
+        setState(() {
+          _images.add({
+            'data_url': 'data:$mime;base64,${base64Encode(bytes)}'
+          });
+        });
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _export() async {
+    final md = await widget.state.exportConversation();
+    if (md == null) return;
+    // 用系统保存对话框
+    final result = await Process.run('powershell', [
+      '-NoProfile',
+      '-Command',
+      "Add-Type -AssemblyName System.Windows.Forms; "
+          "\$d = New-Object System.Windows.Forms.SaveFileDialog; "
+          "\$d.Filter = 'Markdown|*.md'; "
+          "\$d.FileName = 'darling-ai-export.md'; "
+          "if (\$d.ShowDialog() -eq 'OK') { \$d.FileName }"
+    ]);
+    final path = (result.stdout as String).trim();
+    if (path.isEmpty) return;
+    try {
+      final f = File(path);
+      if (!path.toLowerCase().endsWith('.md')) {
+        await f.writeAsString('$md\n');
+      } else {
+        await f.writeAsString(md);
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('已导出: $path')));
+      }
+    } catch (_) {}
   }
 
   void _send() {
     final text = _ctl.text;
     if (text.trim().isEmpty || widget.state.busy) return;
+    final imgs = List<Map<String, dynamic>>.from(_images);
     _ctl.clear();
-    widget.state.send(text);
+    _images.clear();
+    widget.state.send(text, images: imgs);
   }
 
   @override
@@ -258,26 +337,91 @@ class _ComposerState extends State<_Composer> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              TextField(
-                controller: _ctl,
-                minLines: 1,
-                maxLines: 6,
-                enabled: !busy,
-                onSubmitted: (_) => _send(),
-                style: TextStyle(fontSize: 14, color: cs.onSurface),
-                decoration: InputDecoration(
-                  border: InputBorder.none,
-                  hintText: busy ? 'AI 正在回复…' : '随便问点什么，/可查看命令，@可添加上下文...',
-                  hintStyle:
-                      TextStyle(fontSize: 14, color: cs.onSurfaceVariant),
-                  contentPadding:
-                      const EdgeInsets.fromLTRB(16, 14, 16, 10),
+              // 已粘贴图片
+              if (_images.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 10, 12, 0),
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        for (var i = 0; i < _images.length; i++)
+                          Stack(children: [
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(8),
+                              child: Image.memory(
+                                base64Decode(_images[i]['data_url']
+                                    .toString()
+                                    .split(',')
+                                    .last),
+                                width: 56,
+                                height: 56,
+                                fit: BoxFit.cover,
+                              ),
+                            ),
+                            Positioned(
+                              top: 2,
+                              right: 2,
+                              child: GestureDetector(
+                                onTap: () => setState(() => _images.removeAt(i)),
+                                child: Container(
+                                  padding: const EdgeInsets.all(1),
+                                  decoration: const BoxDecoration(
+                                      color: Colors.black54,
+                                      shape: BoxShape.circle),
+                                  child: const Icon(Icons.close,
+                                      size: 12, color: Colors.white),
+                                ),
+                              ),
+                            ),
+                          ]),
+                      ],
+                    ),
+                  ),
+                ),
+              KeyboardListener(
+                focusNode: _focus,
+                autofocus: false,
+                onKeyEvent: (ev) {
+                  if (ev is KeyDownEvent &&
+                      ev.logicalKey == LogicalKeyboardKey.keyV &&
+                      HardwareKeyboard.instance.isControlPressed) {
+                    _pasteImage();
+                  }
+                },
+                child: TextField(
+                  controller: _ctl,
+                  focusNode: _focus,
+                  minLines: 1,
+                  maxLines: 6,
+                  enabled: !busy,
+                  onSubmitted: (_) => _send(),
+                  style: TextStyle(fontSize: 14, color: cs.onSurface),
+                  decoration: InputDecoration(
+                    border: InputBorder.none,
+                    hintText: busy ? 'AI 正在回复…' : '随便问点什么，/可查看命令，Ctrl+V 可粘贴图片...',
+                    hintStyle:
+                        TextStyle(fontSize: 14, color: cs.onSurfaceVariant),
+                    contentPadding:
+                        const EdgeInsets.fromLTRB(16, 14, 16, 10),
+                  ),
                 ),
               ),
               Padding(
                 padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
                 child: Row(
                   children: [
+                    // 导出当前会话
+                    IconButton(
+                      onPressed: busy ? null : _export,
+                      tooltip: '导出会话 (Markdown)',
+                      icon: Icon(Icons.ios_share,
+                          size: 17, color: cs.onSurfaceVariant),
+                      padding: const EdgeInsets.all(6),
+                      constraints: const BoxConstraints(),
+                    ),
                     // 当前模型（点击展开下拉面板，opencode 风格）
                     MenuAnchor(
                       alignmentOffset: const Offset(0, 8),

@@ -134,11 +134,12 @@ def stream_collect(tokens, extra_markers=None, on_visible=None):
 
 
 class Job:
-    def __init__(self, cfg, model, text):
+    def __init__(self, cfg, model, text, images=None):
         self.id = uuid.uuid4().hex[:12]
         self.cfg = cfg
         self.model = model
         self.text = text
+        self.images = images or []   # [{data_url/b64, mime}, ...]
         self.q = queue.Queue()
         self.decision_evt = threading.Event()
         self.decision_allow = None
@@ -178,7 +179,7 @@ def _chat_once_stream(job, messages, settings, provider):
 
 
 def stream_agent(job):
-    """事件化版本的 ChatWorker.run。"""
+    """事件化版本的 ChatWorker.run（3.0：多模态 / 内置工具 / MCP / 容器 / 记忆）。"""
     cfg, model, user_text = job.cfg, job.model, job.text
     settings = cfg.data["settings"]
     provider = cfg.provider(model.get("provider_id"))
@@ -194,11 +195,25 @@ def stream_agent(job):
         return
     workspace = settings.get("workspace") or "."
     mode = settings.get("access_mode", "on_demand")
+    container_mode = settings.get("container_mode", "off") == "container"
 
     messages = core.build_messages(cfg, model["id"])
     history = messages[1:]
-    history.append({"role": "user", "content": user_text})
-    messages.append(history[-1])
+
+    # 多模态：文本 + 图片
+    user_msg = {"role": "user", "content": user_text}
+    if job.images:
+        content_parts = []
+        if user_text.strip():
+            content_parts.append({"type": "text", "text": user_text})
+        for img in job.images:
+            src = img.get("data_url") or img.get("b64") or ""
+            if src:
+                content_parts.append({"type": "image_url", "image_url": {"url": src}})
+        if content_parts:
+            user_msg = {"role": "user", "content": content_parts}
+    history.append(user_msg)
+    messages.append(user_msg)
 
     steps = 0
     last_text = ""
@@ -206,7 +221,9 @@ def stream_agent(job):
     try:
         while steps < core.MAX_AGENT_STEPS:
             steps += 1
-            _emit(job, "state", text="正在思考…" if steps > 1 else "正在连接服务器…")
+            _emit(job, "state", text=f"正在执行第 {steps} 步…" if steps > 1 else "正在连接服务器…")
+            if settings.get("task_mode") and steps == 1:
+                _emit(job, "step", index=0, total=0, text="任务规划中…")
             reply, blocks = _chat_once_stream(job, messages, settings, provider)
             if reply is None:
                 ok_flag = False
@@ -220,7 +237,9 @@ def stream_agent(job):
             for blk in blocks:
                 if isinstance(blk, str):
                     cmd = blk
-                    _emit(job, "tool", title="执行命令", content=cmd, ok=True)
+                    # 容器模式：命令改在容器里执行
+                    _emit(job, "tool", title="容器命令" if container_mode else "执行命令",
+                          content=cmd, ok=True)
                     should_run = True
                     if mode == "on_demand":
                         job.decision_evt.clear()
@@ -240,10 +259,14 @@ def stream_agent(job):
                         _emit(job, "tool", title="执行命令", content="用户拒绝执行，已跳过", ok=False)
                         continue
                     try:
-                        ok, out = core.run_command(cmd, workspace)
+                        if container_mode:
+                            ok, out = core.PLUGIN_HANDLERS["container_exec"](cmd, workspace)
+                        else:
+                            ok, out = core.run_command(cmd, workspace)
                     except Exception as e:
                         ok, out = False, f"(命令执行异常: {e})"
-                    _emit(job, "tool", title="执行命令", content=out or "(无输出)", ok=ok)
+                    _emit(job, "tool", title="容器命令" if container_mode else "执行命令",
+                          content=out or "(无输出)", ok=ok)
                     result_note = f"[命令执行结果]\n命令: {cmd}\n状态: {'成功' if ok else '失败'}\n输出:\n{out}"
                     messages.append({"role": "user", "content": result_note})
                     history.append(messages[-1])
@@ -251,26 +274,54 @@ def stream_agent(job):
                 else:
                     pname, tname, content = blk
                     handler_fn = None
-                    for p in core.load_plugins():
-                        if p["name"] == pname:
-                            for t in p.get("tools", []):
-                                if t.get("name") == tname:
-                                    handler_fn = core.PLUGIN_HANDLERS.get(t.get("handler"))
-                                    break
-                            break
-                    if handler_fn is None:
+                    run_kind = "工具"
+                    # 1) MCP 工具
+                    if str(pname).startswith("MCP::"):
+                        server_name = str(pname)[5:]
+                        try:
+                            import mcp_client
+                            args = {}
+                            try:
+                                parsed = json.loads(content or "{}")
+                                if isinstance(parsed, dict):
+                                    args = parsed
+                                else:
+                                    args = {"query": content}
+                            except Exception:
+                                args = {"query": content}
+                            ok, out = mcp_client.call_tool(settings, server_name, tname, args)
+                            run_kind = f"MCP · {server_name}/{tname}"
+                        except Exception as e:
+                            ok, out = False, f"(MCP 调用异常: {e})"
+                            run_kind = f"MCP · {server_name}/{tname}"
+                    # 2) 内置工具（工作区/浏览器/容器）
+                    elif pname == "内置工具" and tname in core.PLUGIN_HANDLERS:
+                        handler_fn = core.PLUGIN_HANDLERS[tname]
+                        run_kind = f"内置工具 · {tname}"
+                    # 3) 插件工具
+                    else:
+                        for p in core.load_plugins():
+                            if p["name"] == pname:
+                                for t in p.get("tools", []):
+                                    if t.get("name") == tname:
+                                        handler_fn = core.PLUGIN_HANDLERS.get(t.get("handler"))
+                                        run_kind = f"插件 · {pname}/{tname}"
+                                        break
+                                break
+                    if handler_fn is None and run_kind == "工具":
                         messages.append({"role": "user", "content":
-                                         f"[插件调用失败] 插件 {pname} 的工具 {tname} 不存在或已卸载，请勿再调用。"})
+                                         f"[工具调用失败] {pname} 的 {tname} 不存在或已卸载，请勿再调用。"})
                         history.append(messages[-1])
-                        _emit(job, "tool", title=f"插件 · {pname}/{tname}",
-                              content="插件不存在或已卸载，已跳过", ok=False)
+                        _emit(job, "tool", title=f"工具 · {pname}/{tname}",
+                              content="工具不存在或已卸载，已跳过", ok=False)
                         continue
-                    try:
-                        ok, out = handler_fn(content, workspace)
-                    except Exception as e:
-                        ok, out = False, f"(插件执行异常: {e})"
-                    _emit(job, "tool", title=f"插件 · {pname}/{tname}", content=out, ok=ok)
-                    result_note = (f"[插件执行结果]\n插件: {pname}\n工具: {tname}\n"
+                    if handler_fn is not None:
+                        try:
+                            ok, out = handler_fn(content, workspace)
+                        except Exception as e:
+                            ok, out = False, f"(工具执行异常: {e})"
+                    _emit(job, "tool", title=run_kind, content=out or "(无输出)", ok=ok)
+                    result_note = (f"[工具执行结果]\n工具: {run_kind}\n"
                                    f"状态: {'成功' if ok else '失败'}\n结果:\n{out}")
                     messages.append({"role": "user", "content": result_note})
                     history.append(messages[-1])
@@ -295,6 +346,13 @@ def stream_agent(job):
                             break
                 cfg.save()
                 break
+        # 跨会话长期记忆：对话结束后沉淀摘要
+        try:
+            if settings.get("memory_enabled", True):
+                import memory as _memory
+                _memory.save_memories(_memory.summarize_history(history))
+        except Exception:
+            pass
     except Exception as e:
         ok_flag = False
         _emit(job, "error", text=f"对话发生错误: {e}")
@@ -376,7 +434,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(401, {"error": "unauthorized"})
             return
         if p.path == "/api/ping":
-            self._json(200, {"ok": True, "version": "1.1.0"})
+            self._json(200, {"ok": True, "version": "3.0.0"})
             return
         if p.path == "/api/config":
             data = self._cfg().data
@@ -404,6 +462,44 @@ class Handler(BaseHTTPRequestHandler):
         if p.path == "/api/plugins":
             self._json(200, {"plugins": core.load_plugins()})
             return
+        if p.path == "/api/mcp/list":
+            settings = self._cfg().data["settings"]
+            servers = settings.get("mcp_servers") or {}
+            out = {}
+            for sname, scfg in servers.items():
+                out[sname] = {"command": scfg.get("command", ""),
+                              "args": scfg.get("args", []),
+                              "enabled": scfg.get("enabled", True),
+                              "tools": []}
+                try:
+                    import mcp_client
+                    session = mcp_client.get_session(settings, sname)
+                    out[sname]["tools"] = [t.get("name") for t in session.tools_list()]
+                except Exception:
+                    pass
+            self._json(200, {"servers": out})
+            return
+        if p.path == "/api/memory/list":
+            try:
+                import memory as _memory
+                self._json(200, {"memories": _memory.load_memories(max_per_tag=50, max_total=200)})
+            except Exception as e:
+                self._json(200, {"memories": [], "error": str(e)})
+            return
+        if p.path == "/api/container/detect":
+            try:
+                import container as _container
+                self._json(200, _container.detect())
+            except Exception as e:
+                self._json(200, {"platform": "unknown", "error": str(e)})
+            return
+        if p.path == "/api/container/distros":
+            try:
+                import container as _container
+                self._json(200, {"distros": _container.wsl_distros()})
+            except Exception as e:
+                self._json(200, {"distros": [], "error": str(e)})
+            return
         if p.path == "/api/stream":
             qs = parse_qs(p.query)
             job_id = qs.get("job", [""])[0]
@@ -429,8 +525,12 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
             finally:
-                with JOBS_LOCK:
-                    JOBS.pop(job.id, None)
+                # 延迟回收 job（10 秒）：前端流中断后还能重连拿到剩余事件与 done
+                def _delayed_pop():
+                    time.sleep(10)
+                    with JOBS_LOCK:
+                        JOBS.pop(job.id, None)
+                threading.Thread(target=_delayed_pop, daemon=True).start()
             return
         self._json(404, {"error": "not found"})
 
@@ -504,7 +604,7 @@ class Handler(BaseHTTPRequestHandler):
             if not model:
                 self._json(400, {"error": "model not found"})
                 return
-            job = Job(cfg, model, data.get("text", ""))
+            job = Job(cfg, model, data.get("text", ""), images=data.get("images") or [])
             with JOBS_LOCK:
                 JOBS[job.id] = job
             threading.Thread(target=stream_agent, args=(job,), daemon=True).start()
@@ -650,6 +750,126 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, {"ok": True, "path": dest})
             except Exception as e:
                 self._json(200, {"ok": False, "error": str(e)})
+            return
+        # ---- 3.0 新端点 ----
+        if p.path == "/api/mcp/save":
+            cfg = self._cfg()
+            name = str(data.get("name", "")).strip()
+            if not name:
+                self._json(200, {"ok": False, "error": "缺少 MCP server 名称"})
+                return
+            servers = cfg.data["settings"].setdefault("mcp_servers", {})
+            servers[name] = {
+                "command": str(data.get("command", "")).strip(),
+                "args": [str(a) for a in (data.get("args") or [])],
+                "env": data.get("env") or {},
+                "enabled": True if data.get("enabled") is None else bool(data.get("enabled")),
+            }
+            cfg.save()
+            self._json(200, {"ok": True})
+            return
+        if p.path == "/api/mcp/delete":
+            cfg = self._cfg()
+            name = str(data.get("name", "")).strip()
+            servers = cfg.data["settings"].setdefault("mcp_servers", {})
+            servers.pop(name, None)
+            cfg.save()
+            self._json(200, {"ok": True})
+            return
+        if p.path == "/api/mcp/test":
+            cfg = self._cfg()
+            name = str(data.get("name", "")).strip()
+            try:
+                import mcp_client
+                session = mcp_client.get_session(cfg.data["settings"], name)
+                tools = session.tools_list()
+                self._json(200, {"ok": True,
+                                 "tools": [t.get("name") for t in tools]})
+            except Exception as e:
+                self._json(200, {"ok": False, "error": str(e)})
+            return
+        if p.path == "/api/memory/clear":
+            try:
+                import memory as _memory
+                _memory.clear_memories(data.get("tag"))
+                self._json(200, {"ok": True})
+            except Exception as e:
+                self._json(200, {"ok": False, "error": str(e)})
+            return
+        if p.path == "/api/container/install-docker":
+            try:
+                import container as _container
+                ok, out = _container.install_docker()
+                self._json(200, {"ok": ok, "detail": out})
+            except Exception as e:
+                self._json(200, {"ok": False, "error": str(e)})
+            return
+        if p.path == "/api/container/exec":
+            cfg = self._cfg()
+            settings = cfg.data["settings"]
+            command = str(data.get("command", "")).strip()
+            try:
+                import container as _container
+                if _container.is_windows():
+                    target = data.get("target") or settings.get("container_target") or ""
+                    ok, out = _container.wsl_exec(target, command,
+                                                  workspace=settings.get("workspace"))
+                else:
+                    image = data.get("target") or settings.get("container_target") or \
+                            settings.get("container_image") or "ubuntu:latest"
+                    ok, out = _container.docker_exec(image, command,
+                                                     workspace=settings.get("workspace"))
+                self._json(200, {"ok": ok, "output": out})
+            except Exception as e:
+                self._json(200, {"ok": False, "error": str(e)})
+            return
+        if p.path == "/api/browser/open":
+            url = str(data.get("url", "")).strip()
+            try:
+                import workspace_tools
+                ok, out = workspace_tools.handler_browser_open(url)
+                self._json(200, {"ok": ok, "text": out})
+            except Exception as e:
+                self._json(200, {"ok": False, "error": str(e)})
+            return
+        if p.path == "/api/browser/screenshot":
+            url = str(data.get("url", "")).strip()
+            try:
+                import workspace_tools
+                out_path = os.path.join(core.app_dir(), "shot.png")
+                res = workspace_tools.browser_screenshot(url, out_path)
+                if res:
+                    b64 = workspace_tools.image_b64(res)
+                    self._json(200, {"ok": True, "image": "data:image/jpeg;base64," + b64})
+                else:
+                    self._json(200, {"ok": False,
+                                     "error": "未安装 Playwright 浏览器引擎（可选功能），可用文本浏览。"})
+            except Exception as e:
+                self._json(200, {"ok": False, "error": str(e)})
+            return
+        if p.path == "/api/convo/export":
+            cfg = self._cfg()
+            conv_id = data.get("conv_id")
+            convs = cfg.data.setdefault("conversations", [])
+            for c in convs:
+                if c["id"] == conv_id:
+                    hist = c.get("hist", [])
+                    lines = [f"# {c.get('title', '对话')}", ""]
+                    for m in hist:
+                        role = "用户" if m.get("role") == "user" else "助手"
+                        content = m.get("content")
+                        if not isinstance(content, str):
+                            continue
+                        if content.startswith("[命令执行结果]") or content.startswith("[工具执行结果]"):
+                            continue
+                        lines.append(f"## {role}\n\n{content}\n")
+                    md = "\n".join(lines)
+                    self._json(200, {"ok": True,
+                                     "title": c.get("title", "对话"),
+                                     "markdown": md,
+                                     "json": json.dumps(hist, ensure_ascii=False, indent=2)})
+                    return
+            self._json(404, {"error": "conversation not found"})
             return
         self._json(404, {"error": "not found"})
 
