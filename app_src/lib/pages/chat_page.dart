@@ -243,7 +243,7 @@ class _ComposerState extends State<_Composer> {
             "\$d.Multiselect = \$true; "
             "\$d.Filter = '图片|*.png;*.jpg;*.jpeg;*.gif;*.webp;*.bmp'; "
             "if (\$d.ShowDialog() -eq 'OK') { \$d.FileNames -join '|' }"
-      ]);
+      ]).timeout(const Duration(seconds: 30), onTimeout: () => ProcessResult(0, 0, '', ''));
       final paths =
           (result.stdout as String).trim().split('|').where((p) => p.isNotEmpty);
       if (paths.isEmpty) return;
@@ -285,7 +285,7 @@ class _ComposerState extends State<_Composer> {
           "\$d.Filter = 'Markdown|*.md'; "
           "\$d.FileName = 'darling-ai-export.md'; "
           "if (\$d.ShowDialog() -eq 'OK') { \$d.FileName }"
-    ]);
+    ]).timeout(const Duration(seconds: 30), onTimeout: () => ProcessResult(0, 0, '', ''));
     final path = (result.stdout as String).trim();
     if (path.isEmpty) return;
     try {

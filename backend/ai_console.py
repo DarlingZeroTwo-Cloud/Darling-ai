@@ -145,7 +145,7 @@ def clear_screen():
 
 # ==================== 常量 ====================
 APP_NAME = "AI 控制台助手"
-APP_VERSION = "0.3.0"
+APP_VERSION = "3.0.0"
 MAX_AGENT_STEPS = 8          # 一次用户提问后，AI 最多连续执行的命令轮数
 MAX_OUTPUT_CHARS = 20000     # 命令输出回传给 AI 的最大字符数
 HISTORY_LIMIT = 60           # 每个模型保存的历史消息条数上限
