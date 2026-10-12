@@ -61,35 +61,30 @@ ThemeData buildTheme(Brightness b) {
   return ThemeData(
     useMaterial3: true,
     colorScheme: scheme,
-    // 液态玻璃：全局半透明，透出 Windows 亚克力模糊
-    scaffoldBackgroundColor: dark
-        ? const Color(0xB31A1D24)
-        : const Color(0xE6F2F4F8),
-    canvasColor: dark
-        ? const Color(0xB31A1D24)
-        : const Color(0xE6F2F4F8),
+    scaffoldBackgroundColor: dark ? kBgDark : kBgLight,
+    canvasColor: dark ? kBgDark : kBgLight,
     dividerColor: dark ? kOutlineDark : kOutlineLight,
     fontFamilyFallback: const ['Microsoft YaHei', 'PingFang SC', 'Segoe UI', 'Noto Sans CJK SC'],
     cardTheme: CardThemeData(
-      color: dark ? const Color(0x9923272F) : const Color(0x99FFFFFF),
+      color: dark ? kSurfaceDark : kSurfaceLight,
       elevation: 0,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(12),
-        side: BorderSide(color: dark ? const Color(0x40FFFFFF) : const Color(0x33000000)),
+        side: BorderSide(color: dark ? kOutlineDark : kOutlineLight),
       ),
       margin: EdgeInsets.zero,
     ),
     dialogTheme: DialogThemeData(
-      backgroundColor: dark ? const Color(0xF023272F) : const Color(0xF5FFFFFF),
+      backgroundColor: dark ? kSurfaceDark : kSurfaceLight,
       surfaceTintColor: Colors.transparent,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(16),
-        side: BorderSide(color: dark ? const Color(0x40FFFFFF) : const Color(0x33000000)),
+        side: BorderSide(color: dark ? kOutlineDark : kOutlineLight),
       ),
     ),
     inputDecorationTheme: InputDecorationTheme(
       filled: true,
-      fillColor: dark ? const Color(0x6621252D) : const Color(0x66FFFFFF),
+      fillColor: dark ? const Color(0xFF21252D) : const Color(0xFFFAFBFC),
       contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
       border: OutlineInputBorder(
         borderRadius: BorderRadius.circular(10),

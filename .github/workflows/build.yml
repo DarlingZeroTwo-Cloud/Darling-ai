@@ -1,0 +1,193 @@
+name: build-2.1.0
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v2.1.0*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install deps
+        run: |
+          pip install pyinstaller requests
+          choco install innosetup -y
+
+      - name: Build Flutter Windows
+        run: |
+          Remove-Item -Recurse -Force app\lib -ErrorAction SilentlyContinue
+          Copy-Item -Recurse app_src\lib app\lib
+          Copy-Item app_src\pubspec.yaml app\pubspec.yaml -Force
+          cd app
+          flutter pub get
+          flutter build windows --release
+        shell: pwsh
+
+      - name: Build Python backend
+        run: |
+          pip install pyinstaller requests
+          cd backend
+          pyinstaller --onefile --name darling-backend --console bridge_server.py ^
+            --add-data "models_catalog.json;." ^
+            --collect-all requests
+        shell: pwsh
+
+      - name: Assemble dist
+        run: |
+          $DIST = "dist\darling-ai-2.1.0"
+          New-Item -ItemType Directory -Force $DIST | Out-Null
+          New-Item -ItemType Directory -Force "$DIST\backend" | Out-Null
+          New-Item -ItemType Directory -Force "$DIST\plugins" | Out-Null
+          Copy-Item -Recurse "app\build\windows\x64\release\bundle\*" $DIST\
+          Copy-Item "backend\dist\darling-backend\darling-backend.exe" "$DIST\backend\"
+          Copy-Item "backend\plugins\*.json" "$DIST\plugins\" -ErrorAction SilentlyContinue
+        shell: pwsh
+
+      - name: Build installer
+        run: |
+          $iss = @"
+          #define MyAppName "darling-ai"
+          #define MyAppVersion "2.1.0"
+          #define MyAppPublisher "darling"
+          #define MyAppExeName "darling_ai.exe"
+          [Setup]
+          AppId={{8F3A2B1E-4C5D-7E8F-9A0B-1C2D3E4F5A6B}}
+          AppName={#MyAppName}
+          AppVersion={#MyAppVersion}
+          AppPublisher={#MyAppPublisher}
+          AppVerName=darling-ai {#MyAppVersion}
+          DefaultDirName={autopf}\darling-ai
+          DefaultGroupName=darling-ai
+          AllowNoIcons=yes
+          DisableProgramGroupPage=yes
+          OutputDir=.
+          OutputBaseFilename=darling-ai-2.1.0-setup
+          Compression=lzma2
+          SolidCompression=yes
+          WizardStyle=modern
+          UninstallDisplayIcon={app}\{#MyAppExeName}
+          ArchitecturesInstallIn64BitMode=x64compatible
+          PrivilegesRequired=lowest
+          PrivilegesRequiredOverridesAllowed=dialog
+          CloseApplications=yes
+          [Languages]
+          Name: "chinesesimp"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+          [Tasks]
+          Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加图标:"; Flags: checkedonce
+          [Files]
+          Source: "dist\darling-ai-2.1.0\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs
+          [Icons]
+          Name: "{group}\darling-ai"; Filename: "{app}\{#MyAppExeName}"
+          Name: "{group}\卸载 darling-ai"; Filename: "{uninstallexe}"
+          Name: "{commondesktop}\darling-ai"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+          [Run]
+          Filename: "{app}\{#MyAppExeName}"; Description: "立即启动 darling-ai"; Flags: nowait postinstall skipifsilent
+          [UninstallDelete]
+          Type: filesandordirs; Name: "{app}\*"
+          Type: dirifempty; Name: "{app}"
+          [Code]
+          procedure KillAppProcesses;
+          var R: Integer;
+          begin
+            Exec('taskkill.exe', '/F /IM darling_ai.exe /T', '', SW_HIDE, ewWaitUntilTerminated, R);
+            Exec('taskkill.exe', '/F /IM darling-backend.exe /T', '', SW_HIDE, ewWaitUntilTerminated, R);
+            Sleep(600);
+          end;
+          function PrepareToInstall(var NeedsRestart: Boolean): String;
+          begin Result := ''; KillAppProcesses; end;
+          function InitializeUninstall(): Boolean;
+          begin Result := True; KillAppProcesses; end;
+          "@
+          $iss | Out-File -FilePath "build-installer.iss" -Encoding UTF8
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" build-installer.iss
+        shell: pwsh
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload v2.1.0 darling-ai-2.1.0-setup.exe --clobber || \
+          gh release create v2.1.0 darling-ai-2.1.0-setup.exe --title "darling-ai 2.1.0" --notes "基于 2.0 架构优化，全不透明配色，低配机器不卡"
+        shell: pwsh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: darling-ai-2.1.0-windows
+          path: darling-ai-2.1.0-setup.exe
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libgtk-3-dev ninja-build pkg-config liblzma-dev
+          pip install pyinstaller requests
+
+      - name: Build Flutter Linux
+        run: |
+          rm -rf app/lib
+          cp -r app_src/lib app/lib
+          cp app_src/pubspec.yaml app/pubspec.yaml
+          cd app
+          flutter pub get
+          if [ ! -d linux ]; then flutter create --platforms=linux .; fi
+          sed -i 's/set(BINARY_NAME "app")/set(BINARY_NAME "darling_ai")/' linux/CMakeLists.txt
+          sed -i 's/gtk_window_set_title(window, "app")/gtk_window_set_title(window, "darling-ai")/' linux/runner/my_application.cc || true
+          flutter build linux --release
+
+      - name: Build Python backend
+        run: |
+          cd backend
+          pyinstaller --onefile --name darling-backend --console bridge_server.py \
+            --add-data "models_catalog.json:." \
+            --collect-all requests
+
+      - name: Assemble tar.gz
+        run: |
+          DIST=dist/darling-ai-2.1.0
+          rm -rf dist
+          mkdir -p $DIST/backend $DIST/plugins
+          cp -r app/build/linux/x64/release/bundle/. $DIST/
+          cp backend/dist/darling-backend/darling-backend $DIST/backend/
+          chmod +x $DIST/backend/darling-backend
+          cp backend/plugins/*.json $DIST/plugins/ 2>/dev/null || true
+          tar czf darling-ai-2.1.0-linux-x64.tar.gz dist/
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload v2.1.0 darling-ai-2.1.0-linux-x64.tar.gz --clobber || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: darling-ai-2.1.0-linux
+          path: darling-ai-2.1.0-linux-x64.tar.gz
